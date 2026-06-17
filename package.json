@@ -1,0 +1,10 @@
+{
+  "name": "pi-analyzer-netlify",
+  "version": "1.0.0",
+  "description": "Pi Transaction Parser on Netlify Functions",
+  "main": "index.html",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "stellar-sdk": "^10.4.1"
+  }
+}
