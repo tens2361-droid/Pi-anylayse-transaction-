@@ -25,27 +25,27 @@ exports.handler = async (event, context) => {
             }
 
             try {
-                // Sahi tarika Pi ke words ko convert karne ka
                 const seed = await bip39.mnemonicToSeed(mainWalletAddress);
                 const derivedSeed = ed25519.derivePath("m/44'/314159'/0'", seed.toString('hex')).key;
                 const keypair = StellarSdk.Keypair.fromRawEd25519Seed(derivedSeed);
                 mainWalletAddress = keypair.publicKey();
             } catch (err) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Passphrase decode nahi ho paaya. Kripya Public Address (G...) try karein.' }) };
+                return { statusCode: 400, body: JSON.stringify({ error: `Passphrase decode error: ${err.message}` }) };
             }
         }
 
         if (!mainWalletAddress.startsWith("G") || mainWalletAddress.length !== 56) {
-            return { statusCode: 400, body: JSON.stringify({ error: 'Invalid Address format.' }) };
+            return { statusCode: 400, body: JSON.stringify({ error: 'Invalid Address format. Must be 56 chars starting with G.' }) };
         }
 
         let mixedDataset = {};
         let globalStats = { total: 0, success: 0, failed: 0 };
 
+        // 2. DIRECT PI MAINNET URL (No Proxy Garbage)
         let mainnetUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=100&order=desc`;
-        let finalApiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(mainnetUrl)}`;
 
-        const nodeResponse = await axios.get(finalApiUrl, { timeout: 20000 });
+        // Direct hit to Pi nodes
+        const nodeResponse = await axios.get(mainnetUrl, { timeout: 15000 });
         
         if (!nodeResponse.data || !nodeResponse.data._embedded || !nodeResponse.data._embedded.records) {
             return {
@@ -100,17 +100,21 @@ exports.handler = async (event, context) => {
             statusCode: 200,
             headers: { 
                 "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Content-Type"
+                "Access-Control-Allow-Origin": "*"
             },
             body: JSON.stringify({ targetAddress: mainWalletAddress, globalStats, rows: finalRows })
         };
 
     } catch (error) {
-        console.error(error.message);
+        console.error("Backend Error Details:", error);
+        
+        // Exact reason on screen (agar api block hui ya code phata)
+        let specificError = error.response ? `Pi Node returned Status ${error.response.status}` : error.message;
+        
         return {
             statusCode: 500,
-            body: JSON.stringify({ error: 'Pi Network Mainnet Node request failed. Try again.' })
+            headers: { "Access-Control-Allow-Origin": "*" },
+            body: JSON.stringify({ error: `Backend Error: ${specificError}` })
         };
     }
 };
