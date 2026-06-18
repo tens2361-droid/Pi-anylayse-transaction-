@@ -14,29 +14,38 @@ exports.handler = async (event, context) => {
 
         let mainWalletAddress = input.trim();
 
-        // 1. Agar passphrase dala hai toh use strictly convert karo bina kisi fallback ke
+        // 1. Passphrase check (Agar spaces hain)
         if (mainWalletAddress.includes(" ")) {
+            const wordsArray = mainWalletAddress.split(/\s+/); // Words ko count karne ke liye
+            
+            // Agar 24 words se kam hain, toh saaf error do
+            if (wordsArray.length < 24) {
+                return { 
+                    statusCode: 400, 
+                    body: JSON.stringify({ error: `Aapne sirf ${wordsArray.length} words type kiye hain. Pi Network ka passphrase poore 24 words ka hota hai. Kripya poora passphrase daalein ya fir Public Address (G...) daalein.` }) 
+                };
+            }
+
             try {
+                // Agar poore 24 words hain, toh unhe decode karo
                 const seed = StellarSdk.Util.Mnemonic.toSeed(mainWalletAddress);
                 const keypair = StellarSdk.Keypair.fromSecret(StellarSdk.StrKey.encodeEd25519SecretSeed(seed));
                 mainWalletAddress = keypair.publicKey();
             } catch (err) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Passphrase galat hai ya words sahi nahi hain.' }) };
+                return { statusCode: 400, body: JSON.stringify({ error: 'Poore 24 words hain, par kisi word ki spelling galat hai ya sequence Pi standard ka nahi hai.' }) };
             }
         }
 
-        // 2. Strict character evaluation for exact mainnet standards
+        // 2. Strict character evaluation for exact mainnet standards (G... aur 56 chars)
         if (!mainWalletAddress.startsWith("G") || mainWalletAddress.length !== 56) {
-            return { statusCode: 400, body: JSON.stringify({ error: 'Wallet Address G se shuru hona chahiye aur 56 chars ka hona chahiye.' }) };
+            return { statusCode: 400, body: JSON.stringify({ error: 'Invalid Address: Wallet Address "G" se shuru hona chahiye aur theek 56 characters ka hona chahiye.' }) };
         }
 
         let mixedDataset = {};
         let globalStats = { total: 0, success: 0, failed: 0 };
 
-        // 3. Direct Mainnet URL (Hum isme limit=100 rakhenge taaki saare bot attacks scan ho sakein)
+        // 3. Direct Mainnet URL (100 limit ke sath taaki bot attacks scan ho sakein)
         let mainnetUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=100&order=desc`;
-        
-        // CORS proxy bypass router with maximum network timeout configuration
         let finalApiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(mainnetUrl)}`;
 
         const nodeResponse = await axios.get(finalApiUrl, { timeout: 20000 });
@@ -52,7 +61,7 @@ exports.handler = async (event, context) => {
         const records = nodeResponse.data._embedded.records;
 
         records.forEach(op => {
-            // Hum sirf payment aur account creation operations check karenge jahan bot transactions hit hue the
+            // Sirf payment aur create_account track karenge jahan bot ne try kiya
             if (op.type !== 'payment' && op.type !== 'create_account') return;
 
             globalStats.total++;
@@ -61,12 +70,12 @@ exports.handler = async (event, context) => {
             if (isSuccess) globalStats.success++;
             else globalStats.failed++;
 
-            // ASLI FIX: Hum un bots (Receiving/Interacting Addresses) ko track kar rahe hain jinhone is wallet par attack kiya tha
+            // Bot (Receiving/Interacting Address) ko track karna
             let botAddress = "";
             if (op.from && op.from !== mainWalletAddress) {
-                botAddress = op.from; // Agar bot ne paise bheje ya gas lagayi
+                botAddress = op.from;
             } else {
-                botAddress = op.to || op.account || "Core_System_Contract"; // Jis bot address par paise transfer karne ki koshish ki gayi
+                botAddress = op.to || op.account || "Core_System_Contract";
             }
 
             let feeInPi = op.fee_charged ? (parseFloat(op.fee_charged) / 10000000) : 0.01;
@@ -84,7 +93,6 @@ exports.handler = async (event, context) => {
             }
         });
 
-        // Data array parsing for client UI display
         const finalRows = Object.keys(mixedDataset).map(bot => ({
             address: bot,
             total: mixedDataset[bot].total,
@@ -107,7 +115,7 @@ exports.handler = async (event, context) => {
         console.error(error.message);
         return {
             statusCode: 500,
-            body: JSON.stringify({ error: 'Pi Network Mainnet Node is responding slow or blocked your local network range.' })
+            body: JSON.stringify({ error: 'Pi Network Mainnet Node is responding slow or blocked your network request. Please try again.' })
         };
     }
 };
