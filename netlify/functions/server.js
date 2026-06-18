@@ -9,91 +9,90 @@ exports.handler = async (event, context) => {
     try {
         const { input } = JSON.parse(event.body);
         if (!input) {
-            return { statusCode: 400, body: JSON.stringify({ error: 'Input configuration target missing.' }) };
+            return { statusCode: 400, body: JSON.stringify({ error: 'Input wallet details missing.' }) };
         }
 
-        // Confirmed active fallback hash sequence matching production chain
-        let targetAddress = "GBXEDPVVYWL3JL35KYCH7R3KDXWZ72WWNXLSN6MDTFFDLREOIEPMX67V";
-        let rawInput = input.trim();
+        let mainWalletAddress = input.trim();
 
-        if (rawInput.startsWith("G") && rawInput.length === 56) {
-            targetAddress = rawInput;
-        } else if (rawInput.includes(" ") && rawInput.split(" ").length >= 6) {
+        // 1. Agar passphrase dala hai toh use strictly convert karo bina kisi fallback ke
+        if (mainWalletAddress.includes(" ")) {
             try {
-                const seed = StellarSdk.Util.Mnemonic.toSeed(rawInput);
+                const seed = StellarSdk.Util.Mnemonic.toSeed(mainWalletAddress);
                 const keypair = StellarSdk.Keypair.fromSecret(StellarSdk.StrKey.encodeEd25519SecretSeed(seed));
-                targetAddress = keypair.publicKey();
+                mainWalletAddress = keypair.publicKey();
             } catch (err) {
-                // Keep default active address if local conversion returns shortcut logs
+                return { statusCode: 400, body: JSON.stringify({ error: 'Passphrase galat hai ya words sahi nahi hain.' }) };
             }
+        }
+
+        // 2. Strict character evaluation for exact mainnet standards
+        if (!mainWalletAddress.startsWith("G") || mainWalletAddress.length !== 56) {
+            return { statusCode: 400, body: JSON.stringify({ error: 'Wallet Address G se shuru hona chahiye aur 56 chars ka hona chahiye.' }) };
         }
 
         let mixedDataset = {};
         let globalStats = { total: 0, success: 0, failed: 0 };
-        let records = [];
 
-        // Primary Target: Mainnet Core Operations
-        let mainnetUrl = `https://api.mainnet.minepi.com/accounts/${targetAddress}/operations?limit=100&order=desc`;
+        // 3. Direct Mainnet URL (Hum isme limit=100 rakhenge taaki saare bot attacks scan ho sakein)
+        let mainnetUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=100&order=desc`;
         
-        try {
-            // Increased timeout array configuration up to 15 seconds
-            const nodeResponse = await axios.get(mainnetUrl, { timeout: 15000 });
-            if (nodeResponse.data && nodeResponse.data._embedded) {
-                records = nodeResponse.data._embedded.records;
-            }
-        } catch (mainnetError) {
-            console.log("Mainnet pipe rate-limited. Activating Testnet alternative pipeline...");
-            // Secondary Target: Fallback to Testnet data stream if Mainnet rejects node proxy signatures
-            let testnetUrl = `https://api.testnet.minepi.com/accounts/${targetAddress}/operations?limit=100&order=desc`;
-            try {
-                const testnetResponse = await axios.get(testnetUrl, { timeout: 12000 });
-                if (testnetResponse.data && testnetResponse.data._embedded) {
-                    records = testnetResponse.data._embedded.records;
-                }
-            } catch (testnetError) {
-                // If both origins are blocked by proxy context, use active sandbox mock objects to prevent 500 crashes
-                records = [];
-            }
+        // CORS proxy bypass router with maximum network timeout configuration
+        let finalApiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(mainnetUrl)}`;
+
+        const nodeResponse = await axios.get(finalApiUrl, { timeout: 20000 });
+        
+        if (!nodeResponse.data || !nodeResponse.data._embedded || !nodeResponse.data._embedded.records) {
+            return {
+                statusCode: 200,
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+                body: JSON.stringify({ targetAddress: mainWalletAddress, globalStats, rows: [] })
+            };
         }
 
-        // Parse operational loop blocks from retrieved arrays
-        if (records && records.length > 0) {
-            records.forEach(op => {
-                if (op.type !== 'payment' && op.type !== 'create_account') return;
+        const records = nodeResponse.data._embedded.records;
 
-                globalStats.total++;
-                let isSuccess = op.transaction_successful === undefined ? true : op.transaction_successful;
+        records.forEach(op => {
+            // Hum sirf payment aur account creation operations check karenge jahan bot transactions hit hue the
+            if (op.type !== 'payment' && op.type !== 'create_account') return;
 
-                if (isSuccess) globalStats.success++;
-                else globalStats.failed++;
+            globalStats.total++;
+            let isSuccess = op.transaction_successful === undefined ? true : op.transaction_successful;
 
-                let interactionPeer = (op.from && op.from !== targetAddress) ? op.from : (op.to || op.account || "Core_Node");
-                let calculatedFee = op.fee_charged ? (parseFloat(op.fee_charged) / 10000000) : 0.01;
+            if (isSuccess) globalStats.success++;
+            else globalStats.failed++;
 
-                if (!mixedDataset[interactionPeer]) {
-                    mixedDataset[interactionPeer] = { total: 0, success: 0, failed: 0, maxFee: 0 };
-                }
+            // ASLI FIX: Hum un bots (Receiving/Interacting Addresses) ko track kar rahe hain jinhone is wallet par attack kiya tha
+            let botAddress = "";
+            if (op.from && op.from !== mainWalletAddress) {
+                botAddress = op.from; // Agar bot ne paise bheje ya gas lagayi
+            } else {
+                botAddress = op.to || op.account || "Core_System_Contract"; // Jis bot address par paise transfer karne ki koshish ki gayi
+            }
 
-                mixedDataset[interactionPeer].total++;
-                if (isSuccess) mixedDataset[interactionPeer].success++;
-                else mixedDataset[interactionPeer].failed++;
+            let feeInPi = op.fee_charged ? (parseFloat(op.fee_charged) / 10000000) : 0.01;
 
-                if (calculatedFee > mixedDataset[interactionPeer].maxFee) {
-                    mixedDataset[interactionPeer].maxFee = calculatedFee;
-                }
-            });
-        }
+            if (!mixedDataset[botAddress]) {
+                mixedDataset[botAddress] = { total: 0, success: 0, failed: 0, maxFee: 0 };
+            }
 
-        // Compile dataset to match frontend table rows layout architecture
-        const finalRows = Object.keys(mixedDataset).map(peer => ({
-            address: peer,
-            total: mixedDataset[peer].total,
-            success: mixedDataset[peer].success,
-            failed: mixedDataset[peer].failed,
-            maxFee: mixedDataset[peer].maxFee.toFixed(5)
+            mixedDataset[botAddress].total++;
+            if (isSuccess) mixedDataset[botAddress].success++;
+            else mixedDataset[botAddress].failed++;
+
+            if (feeInPi > mixedDataset[botAddress].maxFee) {
+                mixedDataset[botAddress].maxFee = feeInPi;
+            }
+        });
+
+        // Data array parsing for client UI display
+        const finalRows = Object.keys(mixedDataset).map(bot => ({
+            address: bot,
+            total: mixedDataset[bot].total,
+            success: mixedDataset[bot].success,
+            failed: mixedDataset[bot].failed,
+            maxFee: mixedDataset[bot].maxFee.toFixed(5)
         }));
 
-        // Default response return array even if empty logs found to prevent 500 error display
         return {
             statusCode: 200,
             headers: { 
@@ -101,15 +100,14 @@ exports.handler = async (event, context) => {
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "Content-Type"
             },
-            body: JSON.stringify({ targetAddress, globalStats, rows: finalRows })
+            body: JSON.stringify({ targetAddress: mainWalletAddress, globalStats, rows: finalRows })
         };
 
-    } catch (fatalError) {
-        console.error("Fatal:", fatalError.message);
+    } catch (error) {
+        console.error(error.message);
         return {
-            statusCode: 200,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ targetAddress: "Processing_Error", globalStats: { total: 0, success: 0, failed: 0 }, rows: [] })
+            statusCode: 500,
+            body: JSON.stringify({ error: 'Pi Network Mainnet Node is responding slow or blocked your local network range.' })
         };
     }
 };
