@@ -1,5 +1,7 @@
 const axios = require('axios');
 const StellarSdk = require('stellar-sdk');
+const bip39 = require('bip39');
+const ed25519 = require('ed25519-hd-key');
 
 exports.handler = async (event, context) => {
     if (event.httpMethod !== "POST") {
@@ -14,37 +16,32 @@ exports.handler = async (event, context) => {
 
         let mainWalletAddress = input.trim();
 
-        // 1. Passphrase check (Agar spaces hain)
+        // 1. ASLI PI NETWORK PASSPHRASE DECODER
         if (mainWalletAddress.includes(" ")) {
-            const wordsArray = mainWalletAddress.split(/\s+/); // Words ko count karne ke liye
+            const wordsArray = mainWalletAddress.split(/\s+/);
             
-            // Agar 24 words se kam hain, toh saaf error do
             if (wordsArray.length < 24) {
-                return { 
-                    statusCode: 400, 
-                    body: JSON.stringify({ error: `Aapne sirf ${wordsArray.length} words type kiye hain. Pi Network ka passphrase poore 24 words ka hota hai. Kripya poora passphrase daalein ya fir Public Address (G...) daalein.` }) 
-                };
+                return { statusCode: 400, body: JSON.stringify({ error: `Aapne sirf ${wordsArray.length} words type kiye hain. Poore 24 words daalein.` }) };
             }
 
             try {
-                // Agar poore 24 words hain, toh unhe decode karo
-                const seed = StellarSdk.Util.Mnemonic.toSeed(mainWalletAddress);
-                const keypair = StellarSdk.Keypair.fromSecret(StellarSdk.StrKey.encodeEd25519SecretSeed(seed));
+                // Sahi tarika Pi ke words ko convert karne ka
+                const seed = await bip39.mnemonicToSeed(mainWalletAddress);
+                const derivedSeed = ed25519.derivePath("m/44'/314159'/0'", seed.toString('hex')).key;
+                const keypair = StellarSdk.Keypair.fromRawEd25519Seed(derivedSeed);
                 mainWalletAddress = keypair.publicKey();
             } catch (err) {
-                return { statusCode: 400, body: JSON.stringify({ error: 'Poore 24 words hain, par kisi word ki spelling galat hai ya sequence Pi standard ka nahi hai.' }) };
+                return { statusCode: 400, body: JSON.stringify({ error: 'Passphrase decode nahi ho paaya. Kripya Public Address (G...) try karein.' }) };
             }
         }
 
-        // 2. Strict character evaluation for exact mainnet standards (G... aur 56 chars)
         if (!mainWalletAddress.startsWith("G") || mainWalletAddress.length !== 56) {
-            return { statusCode: 400, body: JSON.stringify({ error: 'Invalid Address: Wallet Address "G" se shuru hona chahiye aur theek 56 characters ka hona chahiye.' }) };
+            return { statusCode: 400, body: JSON.stringify({ error: 'Invalid Address format.' }) };
         }
 
         let mixedDataset = {};
         let globalStats = { total: 0, success: 0, failed: 0 };
 
-        // 3. Direct Mainnet URL (100 limit ke sath taaki bot attacks scan ho sakein)
         let mainnetUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=100&order=desc`;
         let finalApiUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(mainnetUrl)}`;
 
@@ -61,7 +58,6 @@ exports.handler = async (event, context) => {
         const records = nodeResponse.data._embedded.records;
 
         records.forEach(op => {
-            // Sirf payment aur create_account track karenge jahan bot ne try kiya
             if (op.type !== 'payment' && op.type !== 'create_account') return;
 
             globalStats.total++;
@@ -70,7 +66,6 @@ exports.handler = async (event, context) => {
             if (isSuccess) globalStats.success++;
             else globalStats.failed++;
 
-            // Bot (Receiving/Interacting Address) ko track karna
             let botAddress = "";
             if (op.from && op.from !== mainWalletAddress) {
                 botAddress = op.from;
@@ -115,7 +110,7 @@ exports.handler = async (event, context) => {
         console.error(error.message);
         return {
             statusCode: 500,
-            body: JSON.stringify({ error: 'Pi Network Mainnet Node is responding slow or blocked your network request. Please try again.' })
+            body: JSON.stringify({ error: 'Pi Network Mainnet Node request failed. Try again.' })
         };
     }
 };
