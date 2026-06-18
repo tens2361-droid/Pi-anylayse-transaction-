@@ -41,11 +41,11 @@ exports.handler = async (event, context) => {
         let mixedDataset = {};
         let globalStats = { total: 0, success: 0, failed: 0 };
 
-        // 2. INCLUDE FAILED DATA & PAGINATION LOOP (Bot tracking ke liye)
-        let nextUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=200&order=desc&include_failed=true`;
+        // 2. THE ULTIMATE FIX: Added `join=transactions` to forcefully fetch fee arrays!
+        let nextUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=200&order=desc&include_failed=true&join=transactions`;
         
         let pageCount = 0;
-        const MAX_PAGES = 10; // Max 2000 records scan karega
+        const MAX_PAGES = 10; 
 
         while (nextUrl && pageCount < MAX_PAGES) {
             try {
@@ -73,16 +73,18 @@ exports.handler = async (event, context) => {
                         botAddress = op.to || op.account || "Core_System_Contract";
                     }
 
-                    // Sahi Fee Calculation Logic:
-                    // Agar transaction header ke records se explicit fee_charged ya max_fee milti hai toh use padho
-                    let feeInPi = 0.01; // Default minimum base cost
+                    // EXACT FEE EXTRACTION LOGIC
+                    let feeInPi = 0.01; // Base Network fee default
                     
-                    if (op.fee_charged) {
+                    // Agar join=transactions success hua, toh bot ka set kiya hua asli high fee nikalega
+                    if (op.transaction) {
+                        if (op.transaction.max_fee) {
+                            feeInPi = parseFloat(op.transaction.max_fee) / 10000000;
+                        } else if (op.transaction.fee_charged) {
+                            feeInPi = parseFloat(op.transaction.fee_charged) / 10000000;
+                        }
+                    } else if (op.fee_charged) {
                         feeInPi = parseFloat(op.fee_charged) / 10000000;
-                    } else if (event.headers && event.headers.fee_charged) {
-                        feeInPi = parseFloat(event.headers.fee_charged) / 10000000;
-                    } else if (op.transaction && op.transaction.fee_charged) {
-                        feeInPi = parseFloat(op.transaction.fee_charged) / 10000000;
                     }
 
                     if (!mixedDataset[botAddress]) {
@@ -93,15 +95,23 @@ exports.handler = async (event, context) => {
                     if (isSuccess) mixedDataset[botAddress].success++;
                     else mixedDataset[botAddress].failed++;
 
-                    // Max fee filter: bot ki sabse high paid gas burst amount ko map karega
+                    // Always track the highest fee the bot tried to burn
                     if (feeInPi > mixedDataset[botAddress].maxFee) {
                         mixedDataset[botAddress].maxFee = feeInPi;
                     }
                 });
 
+                // Next page link setup
                 nextUrl = nodeResponse.data._links.next ? nodeResponse.data._links.next.href : null;
-                if (nextUrl && nextUrl.startsWith('http://')) {
-                    nextUrl = nextUrl.replace('http://', 'https://');
+                
+                if (nextUrl) {
+                    if (nextUrl.startsWith('http://')) {
+                        nextUrl = nextUrl.replace('http://', 'https://');
+                    }
+                    // Ensure the 'join=transactions' tag isn't lost on the next pages
+                    if (!nextUrl.includes('join=transactions')) {
+                         nextUrl += '&join=transactions';
+                    }
                 }
 
                 pageCount++;
@@ -116,9 +126,10 @@ exports.handler = async (event, context) => {
             total: mixedDataset[bot].total,
             success: mixedDataset[bot].success,
             failed: mixedDataset[bot].failed,
-            maxFee: mixedDataset[bot].maxFee > 0 ? mixedDataset[bot].maxFee.toFixed(5) : "0.01000"
+            maxFee: mixedDataset[bot].maxFee.toFixed(5) // Properly formatted Pi amount (e.g., 6.00000)
         }));
 
+        // Sorting the list from the most active bot to the least
         finalRows.sort((a, b) => b.total - a.total);
 
         return {
