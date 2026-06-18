@@ -42,17 +42,15 @@ exports.handler = async (event, context) => {
         let globalStats = { total: 0, success: 0, failed: 0 };
 
         // 2. INCLUDE FAILED DATA & PAGINATION LOOP (Bot tracking ke liye)
-        // limit=200 aur include_failed=true use kiya hai saare red marks nikalne ke liye
         let nextUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=200&order=desc&include_failed=true`;
         
         let pageCount = 0;
-        const MAX_PAGES = 10; // Maximum 2000 transactions scan karega ek baar mein
+        const MAX_PAGES = 10; // Max 2000 records scan karega
 
         while (nextUrl && pageCount < MAX_PAGES) {
             try {
                 const nodeResponse = await axios.get(nextUrl, { timeout: 12000 });
                 
-                // Agar data nahi bacha toh loop rok do
                 if (!nodeResponse.data || !nodeResponse.data._embedded || !nodeResponse.data._embedded.records || nodeResponse.data._embedded.records.length === 0) {
                     break;
                 }
@@ -75,7 +73,17 @@ exports.handler = async (event, context) => {
                         botAddress = op.to || op.account || "Core_System_Contract";
                     }
 
-                    let feeInPi = op.fee_charged ? (parseFloat(op.fee_charged) / 10000000) : 0.01;
+                    // Sahi Fee Calculation Logic:
+                    // Agar transaction header ke records se explicit fee_charged ya max_fee milti hai toh use padho
+                    let feeInPi = 0.01; // Default minimum base cost
+                    
+                    if (op.fee_charged) {
+                        feeInPi = parseFloat(op.fee_charged) / 10000000;
+                    } else if (event.headers && event.headers.fee_charged) {
+                        feeInPi = parseFloat(event.headers.fee_charged) / 10000000;
+                    } else if (op.transaction && op.transaction.fee_charged) {
+                        feeInPi = parseFloat(op.transaction.fee_charged) / 10000000;
+                    }
 
                     if (!mixedDataset[botAddress]) {
                         mixedDataset[botAddress] = { total: 0, success: 0, failed: 0, maxFee: 0 };
@@ -85,22 +93,21 @@ exports.handler = async (event, context) => {
                     if (isSuccess) mixedDataset[botAddress].success++;
                     else mixedDataset[botAddress].failed++;
 
+                    // Max fee filter: bot ki sabse high paid gas burst amount ko map karega
                     if (feeInPi > mixedDataset[botAddress].maxFee) {
                         mixedDataset[botAddress].maxFee = feeInPi;
                     }
                 });
 
-                // Agla page set karo loop chalane ke liye
                 nextUrl = nodeResponse.data._links.next ? nodeResponse.data._links.next.href : null;
-                // Force HTTPS
                 if (nextUrl && nextUrl.startsWith('http://')) {
                     nextUrl = nextUrl.replace('http://', 'https://');
                 }
 
                 pageCount++;
             } catch (pageError) {
-                console.error("Pagination stopped due to network delay at page", pageCount);
-                break; // Netlify timeout se pehle ab tak ka data process kar lo
+                console.error("Pagination delay reached.");
+                break;
             }
         }
 
@@ -109,10 +116,9 @@ exports.handler = async (event, context) => {
             total: mixedDataset[bot].total,
             success: mixedDataset[bot].success,
             failed: mixedDataset[bot].failed,
-            maxFee: mixedDataset[bot].maxFee.toFixed(5)
+            maxFee: mixedDataset[bot].maxFee > 0 ? mixedDataset[bot].maxFee.toFixed(5) : "0.01000"
         }));
 
-        // Table array ko sabse zyada attacks (total transactions) ke hisab se top to bottom sort karo
         finalRows.sort((a, b) => b.total - a.total);
 
         return {
@@ -126,10 +132,7 @@ exports.handler = async (event, context) => {
 
     } catch (error) {
         console.error("Backend Error Details:", error);
-        
-        // Exact reason on screen
         let specificError = error.response ? `Pi Node returned Status ${error.response.status}` : error.message;
-        
         return {
             statusCode: 500,
             headers: { "Access-Control-Allow-Origin": "*" },
