@@ -41,52 +41,68 @@ exports.handler = async (event, context) => {
         let mixedDataset = {};
         let globalStats = { total: 0, success: 0, failed: 0 };
 
-        // 2. DIRECT PI MAINNET URL (No Proxy Garbage)
-        let mainnetUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=100&order=desc`;
-
-        // Direct hit to Pi nodes
-        const nodeResponse = await axios.get(mainnetUrl, { timeout: 15000 });
+        // 2. INCLUDE FAILED DATA & PAGINATION LOOP (Bot tracking ke liye)
+        // limit=200 aur include_failed=true use kiya hai saare red marks nikalne ke liye
+        let nextUrl = `https://api.mainnet.minepi.com/accounts/${mainWalletAddress}/operations?limit=200&order=desc&include_failed=true`;
         
-        if (!nodeResponse.data || !nodeResponse.data._embedded || !nodeResponse.data._embedded.records) {
-            return {
-                statusCode: 200,
-                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-                body: JSON.stringify({ targetAddress: mainWalletAddress, globalStats, rows: [] })
-            };
+        let pageCount = 0;
+        const MAX_PAGES = 10; // Maximum 2000 transactions scan karega ek baar mein
+
+        while (nextUrl && pageCount < MAX_PAGES) {
+            try {
+                const nodeResponse = await axios.get(nextUrl, { timeout: 12000 });
+                
+                // Agar data nahi bacha toh loop rok do
+                if (!nodeResponse.data || !nodeResponse.data._embedded || !nodeResponse.data._embedded.records || nodeResponse.data._embedded.records.length === 0) {
+                    break;
+                }
+
+                const records = nodeResponse.data._embedded.records;
+
+                records.forEach(op => {
+                    if (op.type !== 'payment' && op.type !== 'create_account') return;
+
+                    globalStats.total++;
+                    let isSuccess = op.transaction_successful === undefined ? true : op.transaction_successful;
+
+                    if (isSuccess) globalStats.success++;
+                    else globalStats.failed++;
+
+                    let botAddress = "";
+                    if (op.from && op.from !== mainWalletAddress) {
+                        botAddress = op.from;
+                    } else {
+                        botAddress = op.to || op.account || "Core_System_Contract";
+                    }
+
+                    let feeInPi = op.fee_charged ? (parseFloat(op.fee_charged) / 10000000) : 0.01;
+
+                    if (!mixedDataset[botAddress]) {
+                        mixedDataset[botAddress] = { total: 0, success: 0, failed: 0, maxFee: 0 };
+                    }
+
+                    mixedDataset[botAddress].total++;
+                    if (isSuccess) mixedDataset[botAddress].success++;
+                    else mixedDataset[botAddress].failed++;
+
+                    if (feeInPi > mixedDataset[botAddress].maxFee) {
+                        mixedDataset[botAddress].maxFee = feeInPi;
+                    }
+                });
+
+                // Agla page set karo loop chalane ke liye
+                nextUrl = nodeResponse.data._links.next ? nodeResponse.data._links.next.href : null;
+                // Force HTTPS
+                if (nextUrl && nextUrl.startsWith('http://')) {
+                    nextUrl = nextUrl.replace('http://', 'https://');
+                }
+
+                pageCount++;
+            } catch (pageError) {
+                console.error("Pagination stopped due to network delay at page", pageCount);
+                break; // Netlify timeout se pehle ab tak ka data process kar lo
+            }
         }
-
-        const records = nodeResponse.data._embedded.records;
-
-        records.forEach(op => {
-            if (op.type !== 'payment' && op.type !== 'create_account') return;
-
-            globalStats.total++;
-            let isSuccess = op.transaction_successful === undefined ? true : op.transaction_successful;
-
-            if (isSuccess) globalStats.success++;
-            else globalStats.failed++;
-
-            let botAddress = "";
-            if (op.from && op.from !== mainWalletAddress) {
-                botAddress = op.from;
-            } else {
-                botAddress = op.to || op.account || "Core_System_Contract";
-            }
-
-            let feeInPi = op.fee_charged ? (parseFloat(op.fee_charged) / 10000000) : 0.01;
-
-            if (!mixedDataset[botAddress]) {
-                mixedDataset[botAddress] = { total: 0, success: 0, failed: 0, maxFee: 0 };
-            }
-
-            mixedDataset[botAddress].total++;
-            if (isSuccess) mixedDataset[botAddress].success++;
-            else mixedDataset[botAddress].failed++;
-
-            if (feeInPi > mixedDataset[botAddress].maxFee) {
-                mixedDataset[botAddress].maxFee = feeInPi;
-            }
-        });
 
         const finalRows = Object.keys(mixedDataset).map(bot => ({
             address: bot,
@@ -95,6 +111,9 @@ exports.handler = async (event, context) => {
             failed: mixedDataset[bot].failed,
             maxFee: mixedDataset[bot].maxFee.toFixed(5)
         }));
+
+        // Table array ko sabse zyada attacks (total transactions) ke hisab se top to bottom sort karo
+        finalRows.sort((a, b) => b.total - a.total);
 
         return {
             statusCode: 200,
@@ -108,7 +127,7 @@ exports.handler = async (event, context) => {
     } catch (error) {
         console.error("Backend Error Details:", error);
         
-        // Exact reason on screen (agar api block hui ya code phata)
+        // Exact reason on screen
         let specificError = error.response ? `Pi Node returned Status ${error.response.status}` : error.message;
         
         return {
